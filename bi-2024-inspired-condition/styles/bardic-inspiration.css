@@ -1,0 +1,21 @@
+.bi2024-dialog p,
+.bi2024-summary p {
+  margin: 0 0 0.5rem;
+}
+
+.bi2024-dialog p:last-child,
+.bi2024-summary p:last-child {
+  margin-bottom: 0;
+}
+
+.bi2024-chat-button-wrap {
+  margin-top: 0.5rem;
+}
+
+.bi2024-chat-button {
+  width: 100%;
+  align-items: center;
+  display: inline-flex;
+  gap: 0.35rem;
+  justify-content: center;
+}

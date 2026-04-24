@@ -1,0 +1,7 @@
+{
+  "bi-2024-inspired-condition.notifications.noTarget": "Target exactly one creature before using Bardic Inspiration.",
+  "bi-2024-inspired-condition.notifications.selfNotAllowed": "Self Bardic Inspiration is disabled by module settings.",
+  "bi-2024-inspired-condition.notifications.multipleTargets": "Multiple Bardic Inspiration targets are disabled, so only the first target will be inspired.",
+  "bi-2024-inspired-condition.notifications.alreadyInspired": "{actor} already has Bardic Inspiration.",
+  "bi-2024-inspired-condition.notifications.applied": "Applied Inspired to {count} target(s)."
+}

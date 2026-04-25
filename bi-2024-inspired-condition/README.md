@@ -7,7 +7,7 @@ This module automates the 2024 Bardic Inspiration flow for Foundry VTT v13 and t
 - Detects Bardic Inspiration item usage from the dnd5e activity workflow.
 - Falls back to chat-message detection for item cards/messages named `Bardic Inspiration`.
 - Applies an `Inspired` Active Effect to the chosen target.
-- Stores the source bard, bardic die, application time, and usage state in `flags.bi2024`.
+- Stores the source bard, bardic die, application time, and usage state in the module's effect flags.
 - Prompts the owning player, or the GM if no owner is active, when the inspired actor makes a valid d20 roll.
 - Rolls Bardic Inspiration on demand, posts the inspiration roll to chat, posts a follow-up total, and removes the effect.
 
@@ -28,11 +28,39 @@ This module automates the 2024 Bardic Inspiration flow for Foundry VTT v13 and t
 
 ## Installation
 
-1. Create a folder in Foundry's `Data/modules` directory named `bi-2024-inspired-condition`.
-2. Place the files from this module inside that folder.
-3. Restart Foundry.
-4. Enable the module in your world.
-5. Target one token and use `Bardic Inspiration`.
+### Manifest Install
+
+1. Open Foundry VTT.
+2. Go to `Add-on Modules`.
+3. Click `Install Module`.
+4. Paste this manifest URL:
+
+```text
+https://raw.githubusercontent.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/main/bi-2024-inspired-condition/module.json
+```
+
+5. Install the module.
+6. Open your world and enable `Bardic Inspiration 2024 Inspired Condition`.
+
+### Manual Install
+
+1. Download the latest release zip:
+
+```text
+https://github.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/releases/latest/download/bi-2024-inspired-condition.zip
+```
+
+2. Extract it into Foundry's `Data/modules` directory.
+3. Make sure the final folder is named `bi-2024-inspired-condition`.
+4. Restart Foundry.
+5. Enable the module in your world.
+6. Target one token and use `Bardic Inspiration`.
+
+## GitHub
+
+- Repository: `https://github.com/jake2english-beep/Foundry-Bardic-Inspiration-v13`
+- Manifest: `https://raw.githubusercontent.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/main/bi-2024-inspired-condition/module.json`
+- Latest Download: `https://github.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/releases/latest/download/bi-2024-inspired-condition.zip`
 
 ## Settings
 

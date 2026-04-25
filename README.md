@@ -59,7 +59,7 @@ https://github.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/releases/lat
 
 ## GitHub
 
-- Repository: `https://github.com/jake2english-beep/Foundry-Bardic-Inspiration-v13`
+- Repository: `https://github.com/GingaNinja71/Foundry-Bardic-Inspiration-v13/edit/main/README.md`
 - Manifest: `https://raw.githubusercontent.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/main/bi-2024-inspired-condition/module.json`
 - Latest Download: `https://github.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/releases/latest/download/bi-2024-inspired-condition.zip`
 

@@ -37,7 +37,7 @@ This module automates the 2024 Bardic Inspiration flow for Foundry VTT v13 and t
 4. Paste this manifest URL:
 
 ```text
-https://raw.githubusercontent.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/main/bi-2024-inspired-condition/module.json
+https://raw.githubusercontent.com/GingaNinja71/Foundry-Bardic-Inspiration-v13/main/bi-2024-inspired-condition/module.json
 ```
 
 5. Install the module.

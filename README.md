@@ -48,7 +48,7 @@ https://raw.githubusercontent.com/jake2english-beep/Foundry-Bardic-Inspiration-v
 1. Download the latest release zip:
 
 ```text
-https://github.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/releases/latest/download/bi-2024-inspired-condition.zip
+https://github.com/GingaNinja71/Foundry-Bardic-Inspiration-v13/releases/latest/download/bi-2024-inspired-condition.zip
 ```
 
 2. Extract it into Foundry's `Data/modules` directory.
@@ -61,7 +61,7 @@ https://github.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/releases/lat
 
 - Repository: `https://github.com/GingaNinja71/Foundry-Bardic-Inspiration-v13/edit/main/README.md`
 - Manifest: `https://raw.githubusercontent.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/main/bi-2024-inspired-condition/module.json`
-- Latest Download: `https://github.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/releases/latest/download/bi-2024-inspired-condition.zip`
+- Latest Download: `https://github.com/GingaNinja71/Foundry-Bardic-Inspiration-v13/releases/latest/download/bi-2024-inspired-condition.zip`
 
 ## Settings
 

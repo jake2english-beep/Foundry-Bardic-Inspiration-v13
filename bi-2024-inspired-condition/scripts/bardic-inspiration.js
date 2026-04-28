@@ -4,17 +4,22 @@ const FLAG_SCOPE = MODULE_ID;
 const LEGACY_FLAG_SCOPE = "bi2024";
 const STATUS_ID = `${MODULE_ID}.inspired`;
 const EFFECT_NAME = "Inspired";
-const EFFECT_ICON = "icons/sundries/scrolls/scroll-symbol-eye-brown.webp";
+const EFFECT_ICON = `modules/${MODULE_ID}/icons/bardic-inspiration.svg`;
+const EFFECT_DURATION_SECONDS = 3600;
 const ROLL_TYPES = new Set(["attack", "save", "check", "skill"]);
-const RECENT_APPLICATIONS = new Map();
-const HANDLED_PROMPTS = new Set();
-const HANDLED_APPLICATION_MESSAGES = new Set();
 const ROLL_HOOKS = {
   "dnd5e.rollAttack": "attack",
   "dnd5e.rollAbilityCheck": "check",
   "dnd5e.rollSavingThrow": "save",
   "dnd5e.rollSkill": "skill"
 };
+
+const RECENT_TARGET_APPLICATIONS = new Map();
+const RECENT_SOURCE_APPLICATIONS = new Map();
+const ACTIVE_APPLICATIONS = new Set();
+const HANDLED_PROMPTS = new Set();
+const HANDLED_APPLICATION_MESSAGES = new Set();
+const CONSOLIDATION_TIMERS = new Map();
 
 Hooks.once("init", () => {
   registerSettings();
@@ -26,22 +31,26 @@ Hooks.once("ready", () => {
     console.warn(`${MODULE_ID} | This module is intended for the dnd5e system.`);
   }
 
-  game.modules.get(MODULE_ID).api = {
-    applyBardicInspiration,
-    removeBardicInspiration,
-    getBardicDie,
-    hasBardicInspiration,
-    promptUseInspiration
-  };
+  const module = game.modules.get(MODULE_ID);
+  if (module) {
+    module.api = {
+      applyBardicInspiration,
+      removeBardicInspiration,
+      getBardicDie,
+      hasBardicInspiration,
+      promptUseInspiration
+    };
+  }
 
   if (game.socket) game.socket.on(SOCKET_NAME, onSocketMessage);
 
   Hooks.on("dnd5e.postUseActivity", onPostUseActivity);
   Hooks.on("createChatMessage", onCreateChatMessage);
+  Hooks.on("createActiveEffect", onCreateActiveEffect);
   Hooks.on("renderChatMessage", onRenderChatMessage);
-  Hooks.on("midi-qol.RollComplete", onMidiRollComplete);
-  registerRollHooks();
+  if (isMidiQolActive()) Hooks.on("midi-qol.AttackRollComplete", onMidiAttackRollComplete);
 
+  registerRollHooks();
   debug("Module ready");
 });
 
@@ -107,11 +116,13 @@ function registerStatusEffect() {
 async function onPostUseActivity(activity, usageConfig, results) {
   try {
     const item = activity?.item;
-    if (!isBardicInspirationItem(item)) return;
-    rememberApplicationMessage(results?.message);
+    const sourceActor = item?.actor ?? activity?.actor;
+    if (!sourceActor || !isBardicInspirationItem(item)) return;
     if (!shouldHandleActivityApplication(item, results?.message)) return;
 
-    await applyFromCurrentTargets(item.actor ?? activity.actor, item);
+    rememberApplicationMessage(results?.message);
+    rememberRecentSourceApplication(sourceActor, item);
+    await applyFromCurrentTargets(sourceActor, item);
   } catch (error) {
     console.error(`${MODULE_ID} | Failed to process Bardic Inspiration activity`, error);
   }
@@ -119,18 +130,29 @@ async function onPostUseActivity(activity, usageConfig, results) {
 
 async function onCreateChatMessage(message, options, userId) {
   try {
+    if (await maybeSuppressBardicInspirationCastRoll(message, userId)) return;
     if (message.getFlag(MODULE_ID, "ignorePrompt")) return;
     if (userId !== game.user.id) return;
+    if (!looksLikeBardicInspirationMessage(message)) return;
+    if (wasApplicationMessageHandled(message)) return;
 
-    if (looksLikeBardicInspirationMessage(message)) {
-      if (wasApplicationMessageHandled(message)) return;
-      rememberApplicationMessage(message);
-      const sourceActor = getActorFromMessage(message);
-      await applyFromCurrentTargets(sourceActor, message.item ?? null, { chatFallback: true });
-    }
+    const sourceActor = getActorFromMessage(message);
+    if (!sourceActor) return;
+    if (wasRecentSourceApplication(sourceActor)) return;
+
+    rememberApplicationMessage(message);
+    rememberRecentSourceApplication(sourceActor);
+    await applyFromCurrentTargets(sourceActor, message.item ?? null, { chatFallback: true });
   } catch (error) {
     console.error(`${MODULE_ID} | Failed while handling chat message`, error);
   }
+}
+
+function onCreateActiveEffect(effect) {
+  const actor = effect?.parent;
+  if (actor?.documentName !== "Actor") return;
+  if (!isInspiredCandidate(effect)) return;
+  scheduleInspiredConsolidation(actor, effect.id);
 }
 
 async function onRenderChatMessage(message, html) {
@@ -138,11 +160,8 @@ async function onRenderChatMessage(message, html) {
     if (message.getFlag(MODULE_ID, "ignorePrompt")) return;
 
     const actor = getActorFromMessage(message);
-    if (!actor) return;
-    if (!isPromptUserForActor(actor)) return;
-
-    const effect = findInspiredEffect(actor);
-    if (!effect) return;
+    if (!actor || !isPromptUserForActor(actor)) return;
+    if (!findInspiredEffect(actor)) return;
 
     const rollInfo = extractRollInfoFromRenderedMessage(message, html);
     if (!rollInfo.valid) return;
@@ -153,18 +172,50 @@ async function onRenderChatMessage(message, html) {
   }
 }
 
-function onMidiRollComplete(workflow) {
-  if (!game.modules.get("midi-qol")?.active) return;
-  if (!workflow?.itemCardUuid || !workflow?.actor) return;
+async function onMidiAttackRollComplete(workflow) {
+  try {
+    const actor = workflow?.actor;
+    if (!actor || !isPromptUserForActor(actor)) return;
 
-  debug("Midi-QOL workflow observed", {
-    actor: workflow.actor.name,
-    item: workflow.item?.name
-  });
+    const effect = findInspiredEffect(actor);
+    if (!effect || getEffectFlags(effect).used) return;
 
-  const attackRoll = workflow.attackRoll;
-  if (attackRoll) {
-    void maybePromptFromRoll("attack", [attackRoll], { subject: workflow.actor, workflowId: workflow.id ?? workflow.uuid ?? null });
+    const total = Number(workflow.attackTotal ?? workflow.attackRoll?.total ?? 0);
+    if (!Number.isFinite(total)) return;
+
+    const targetCount = Number(workflow.targets?.size ?? 0);
+    const hitCount = Number(workflow.hitTargets?.size ?? 0) + Number(workflow.hitTargetsEC?.size ?? 0);
+    const failureKnown = targetCount > 0;
+    const failed = failureKnown ? hitCount === 0 : null;
+    const messageUuid = workflow.itemCardUuid ?? workflow.uuid ?? workflow.id ?? null;
+
+    const rollInfo = {
+      valid: true,
+      rollType: "attack",
+      label: humanizeRollType("attack"),
+      total,
+      failureKnown,
+      failed,
+      messageUuid,
+      messageId: fromUuidSync?.(messageUuid)?.id ?? null,
+      promptId: buildPromptId(actor, {
+        rollType: "attack",
+        total,
+        messageUuid
+      }),
+      midiWorkflow: true
+    };
+
+    if (HANDLED_PROMPTS.has(rollInfo.promptId)) return;
+
+    const shouldPrompt = !setting("promptOnlyOnFailedRollsWhenKnown")
+      || !rollInfo.failureKnown
+      || Boolean(rollInfo.failed);
+    if (!shouldPrompt) return;
+
+    await promptUseInspiration(actor, rollInfo);
+  } catch (error) {
+    console.error(`${MODULE_ID} | Failed while handling Midi-QOL attack completion`, error);
   }
 }
 
@@ -176,7 +227,6 @@ function registerRollHooks() {
   }
 }
 
-
 async function applyFromCurrentTargets(sourceActor, sourceItem = null, { chatFallback = false } = {}) {
   if (!sourceActor) return;
 
@@ -187,26 +237,26 @@ async function applyFromCurrentTargets(sourceActor, sourceItem = null, { chatFal
   }
 
   const filteredTargets = enforceTargetCount(targets);
-  const results = [];
+  const appliedActors = [];
   for (const targetActor of filteredTargets) {
     const applied = await applyBardicInspiration(sourceActor, targetActor, { sourceItem, chatFallback });
-    if (applied) results.push(targetActor);
+    if (applied) appliedActors.push(targetActor);
   }
 
-  if (results.length) {
+  if (appliedActors.length) {
     ui.notifications.info(game.i18n.format(`${MODULE_ID}.notifications.applied`, {
-      count: results.length
+      count: appliedActors.length
     }));
   }
 }
 
 function getEligibleTargetActors(sourceActor) {
   const allowSelf = setting("allowSelfInspiration");
-  const actors = Array.from(game.user.targets ?? [])
+  const targetActors = Array.from(game.user.targets ?? [])
     .map((token) => token?.actor)
-    .filter((actor) => actor);
+    .filter(Boolean);
 
-  return actors.filter((actor) => {
+  return targetActors.filter((actor) => {
     if ((actor.uuid !== sourceActor.uuid) || allowSelf) return true;
     ui.notifications.warn(game.i18n.localize(`${MODULE_ID}.notifications.selfNotAllowed`));
     return false;
@@ -223,32 +273,64 @@ async function applyBardicInspiration(sourceActor, target, { sourceItem = null, 
   const targetActor = getActorFromTarget(target);
   if (!sourceActor || !targetActor) return false;
 
-  const effectKey = `${sourceActor.uuid}->${targetActor.uuid}`;
-  if (wasRecentlyApplied(effectKey)) {
-    debug("Skipping duplicate Bardic Inspiration application", { effectKey, chatFallback });
+  const dedupeKey = `${sourceActor.uuid}->${targetActor.uuid}`;
+  if (ACTIVE_APPLICATIONS.has(dedupeKey)) {
+    debug("Skipping in-flight Bardic Inspiration application", { dedupeKey, chatFallback });
+    return false;
+  }
+  if (wasRecentlyAppliedToTarget(dedupeKey)) {
+    debug("Skipping duplicate Bardic Inspiration application", { dedupeKey, chatFallback });
     return false;
   }
 
-  const existing = findInspiredEffect(targetActor);
-  if (existing && !setting("replaceExisting")) {
-    ui.notifications.warn(game.i18n.format(`${MODULE_ID}.notifications.alreadyInspired`, {
-      actor: targetActor.name
-    }));
-    rememberApplication(effectKey);
-    return false;
-  }
+  ACTIVE_APPLICATIONS.add(dedupeKey);
+  try {
+    const candidates = getInspiredEffects(targetActor);
+    const moduleExisting = candidates.find((effect) => Boolean(getEffectFlags(effect)?.die)) ?? null;
+    if (moduleExisting && !setting("replaceExisting")) {
+      ui.notifications.warn(game.i18n.format(`${MODULE_ID}.notifications.alreadyInspired`, {
+        actor: targetActor.name
+      }));
+      rememberTargetApplication(dedupeKey);
+      return false;
+    }
 
+    const effectData = buildInspiredEffectData(sourceActor, sourceItem);
+    let keeper = moduleExisting ?? candidates[0] ?? null;
+
+    if (keeper) {
+      await keeper.update(effectData);
+    } else {
+      [keeper] = await targetActor.createEmbeddedDocuments("ActiveEffect", [effectData]);
+    }
+
+    await consolidateInspiredEffects(targetActor, keeper?.id ?? null, effectData);
+    rememberTargetApplication(dedupeKey);
+
+    debug("Applied Bardic Inspiration", {
+      source: sourceActor.name,
+      target: targetActor.name,
+      die: getEffectFlags(keeper)?.die ?? effectData.flags[FLAG_SCOPE].die
+    });
+    return true;
+  } finally {
+    ACTIVE_APPLICATIONS.delete(dedupeKey);
+  }
+}
+
+function buildInspiredEffectData(sourceActor, sourceItem = null) {
   const die = getBardicDie(sourceActor);
-  const now = Date.now();
   const moduleVersion = game.modules.get(MODULE_ID)?.version ?? "0.0.0";
-  const effectData = {
+  const appliedAt = Date.now();
+
+  return {
     name: EFFECT_NAME,
     img: EFFECT_ICON,
     origin: sourceItem?.uuid ?? sourceActor.uuid,
     disabled: false,
     statuses: [STATUS_ID],
     duration: {
-      seconds: 3600,
+      seconds: EFFECT_DURATION_SECONDS,
       startTime: game.time?.worldTime ?? 0
     },
     flags: {
@@ -256,7 +338,7 @@ async function applyBardicInspiration(sourceActor, target, { sourceItem = null, 
         sourceActorUuid: sourceActor.uuid,
         sourceActorName: sourceActor.name,
         die,
-        appliedAt: now,
+        appliedAt,
         used: false,
         moduleVersion
       },
@@ -265,24 +347,12 @@ async function applyBardicInspiration(sourceActor, target, { sourceItem = null, 
       }
     }
   };
-
-  if (existing) await existing.update(effectData);
-  else await targetActor.createEmbeddedDocuments("ActiveEffect", [effectData]);
-
-  rememberApplication(effectKey);
-  debug("Applied Bardic Inspiration", {
-    source: sourceActor.name,
-    target: targetActor.name,
-    die
-  });
-  return true;
 }
 
 async function removeBardicInspiration(targetActor) {
   const actor = getActorFromTarget(targetActor);
-  const effect = actor ? findInspiredEffect(actor) : null;
-  if (!effect) return false;
-  await effect.delete();
+  if (!actor) return false;
+  await removeInspiredEffect(actor, findInspiredEffect(actor));
   return true;
 }
 
@@ -304,15 +374,13 @@ function getBardLevel(actor) {
   let bardLevel = 0;
   for (const item of actor.items ?? []) {
     if (item.type !== "class") continue;
-    if ((item.name ?? "").trim().toLowerCase() !== "bard") continue;
+    if (String(item.name ?? "").trim().toLowerCase() !== "bard") continue;
     bardLevel += Number(item.system?.levels ?? item.system?.level ?? 0);
   }
-
   if (bardLevel > 0) return bardLevel;
 
   for (const classItem of Object.values(actor.classes ?? {})) {
-    const className = (classItem?.name ?? "").trim().toLowerCase();
-    if (className !== "bard") continue;
+    if (String(classItem?.name ?? "").trim().toLowerCase() !== "bard") continue;
     bardLevel += Number(classItem.system?.levels ?? classItem.levels ?? classItem._source?.system?.levels ?? 0);
   }
 
@@ -320,8 +388,7 @@ function getBardLevel(actor) {
 }
 
 function hasBardicInspiration(actor) {
-  const targetActor = getActorFromTarget(actor);
-  return Boolean(findInspiredEffect(targetActor));
+  return Boolean(findInspiredEffect(getActorFromTarget(actor)));
 }
 
 async function promptUseInspiration(actor, rollData = {}) {
@@ -337,24 +404,29 @@ async function promptUseInspiration(actor, rollData = {}) {
     return false;
   }
 
+  const promptId = rollData.promptId ?? buildPromptId(targetActor, rollData);
+  if (HANDLED_PROMPTS.has(promptId)) return false;
+
   const request = {
     type: "prompt",
-    promptId: rollData.promptId ?? buildPromptId(targetActor, rollData),
+    promptId,
     targetUserId: owner.id,
     actorUuid: targetActor.uuid,
     effectUuid: effect.uuid,
     rollData: {
       actorName: targetActor.name,
-      rollType: rollData.rollType ?? "d20 Test",
+      rollType: rollData.rollType ?? "D20 Test",
       total: rollData.total ?? 0,
       messageUuid: rollData.messageUuid ?? null,
       messageId: rollData.messageId ?? null,
+      tokenUuid: rollData.tokenUuid ?? null,
+      targetNumber: rollData.targetNumber ?? null,
+      rollJson: rollData.rollJson ?? null,
+      midiWorkflow: Boolean(rollData.midiWorkflow),
       failureKnown: rollData.failureKnown ?? false,
       failed: rollData.failed ?? null
     }
   };
-
-  if (HANDLED_PROMPTS.has(request.promptId)) return false;
 
   if (owner.id === game.user.id) {
     await showInspirationPrompt(request);
@@ -366,15 +438,14 @@ async function promptUseInspiration(actor, rollData = {}) {
 }
 
 async function maybePromptFromRoll(rollType, rolls, data = {}) {
+  if ((rollType === "attack") && isMidiQolActive()) return;
+
   const actor = getActorFromRollContext(data);
-  if (!actor) return;
-  if (!isPromptUserForActor(actor)) return;
+  if (!actor || !isPromptUserForActor(actor)) return;
 
   const effect = findInspiredEffect(actor);
   if (!effect) return;
-
-  const flags = getEffectFlags(effect);
-  if (flags.used) return;
+  if (getEffectFlags(effect).used) return;
 
   const rollInfo = extractRollInfoFromRolls(rollType, rolls, data);
   if (!rollInfo.valid) return;
@@ -383,32 +454,9 @@ async function maybePromptFromRoll(rollType, rolls, data = {}) {
   const shouldPrompt = !setting("promptOnlyOnFailedRollsWhenKnown")
     || !rollInfo.failureKnown
     || Boolean(rollInfo.failed);
+  if (!shouldPrompt) return;
 
-  if (!shouldPrompt) {
-    debug("Skipping prompt because roll appears to have succeeded", {
-      actor: actor.name,
-      rollInfo
-    });
-    return;
-  }
-
-  await promptUseInspiration(actor, {
-    rollType: rollInfo.label,
-    total: rollInfo.total,
-    messageUuid: rollInfo.messageUuid,
-    messageId: rollInfo.messageId,
-    failureKnown: rollInfo.failureKnown,
-    failed: rollInfo.failed,
-    promptId: rollInfo.promptId
-  });
-}
-
-function extractRollInfoFromMessage(message) {
-  return extractRollInfoFromRolls(
-    "message",
-    Array.isArray(message.rolls) ? message.rolls : [],
-    { message }
-  );
+  await promptUseInspiration(actor, rollInfo);
 }
 
 function extractRollInfoFromRenderedMessage(message, html) {
@@ -419,14 +467,8 @@ function extractRollInfoFromRenderedMessage(message, html) {
   if (!root) return { valid: false };
 
   const text = root.textContent?.toLowerCase?.() ?? "";
-  const hasEligibleLabel = [
-    "attack",
-    "saving throw",
-    "save",
-    "ability check",
-    "skill"
-  ].some((entry) => text.includes(entry));
-
+  const hasEligibleLabel = ["attack", "saving throw", "save", "ability check", "skill"]
+    .some((entry) => text.includes(entry));
   const hasD20Text = text.includes("1d20") || text.includes("d20");
   if (!hasEligibleLabel || !hasD20Text) return { valid: false };
 
@@ -437,37 +479,43 @@ function extractRollInfoFromRenderedMessage(message, html) {
 
   return {
     valid: true,
-    total: Number.isFinite(total) ? total : 0,
     rollType,
     label: humanizeRollType(rollType),
+    total: Number.isFinite(total) ? total : 0,
     failureKnown: false,
     failed: null,
     messageUuid: message?.uuid ?? null,
     messageId: message?.id ?? null,
-    promptId: buildRollPromptId({ message }, rollType, null, Number.isFinite(total) ? total : 0)
+    promptId: buildPromptId(getActorFromMessage(message), {
+      rollType,
+      total: Number.isFinite(total) ? total : 0,
+      messageUuid: message?.uuid ?? null
+    })
   };
 }
 
+function extractRollInfoFromMessage(message) {
+  return extractRollInfoFromRolls(
+    "message",
+    Array.isArray(message.rolls) ? message.rolls : [],
+    { message }
+  );
+}
+
 function extractRollInfoFromRolls(baseRollType, rolls, data = {}) {
-  const message = data?.message ?? null;
-  const dnd5eRoll = message?.getFlag?.("dnd5e", "roll") ?? {};
-  const midiFlags = data?.workflow?.hitTargets ? data.workflow : (message?.flags?.["midi-qol"] ?? {});
   const firstRoll = rolls[0] ?? null;
-  const total = Number(firstRoll?.total ?? 0);
-    const typeString = [
+  if (!firstRoll) return { valid: false };
+
+  const typeString = [
     baseRollType,
-    dnd5eRoll.type,
-    dnd5eRoll.rollType,
+    data?.message?.getFlag?.("dnd5e", "roll")?.type,
+    data?.message?.getFlag?.("dnd5e", "roll")?.rollType,
     firstRoll?.options?.rollType,
-    message?.flavor
+    data?.message?.flavor
   ].filter(Boolean).join(" ").toLowerCase();
 
-  const isInitiative = typeString.includes("initiative")
-    || Boolean(message?.getFlag?.("core", "initiativeRoll"))
-    || Boolean(firstRoll?.options?.initiative);
-  if (isInitiative && !setting("promptOnInitiative")) {
-    return { valid: false };
-  }
+  const isInitiative = typeString.includes("initiative") || Boolean(firstRoll?.options?.initiative);
+  if (isInitiative && !setting("promptOnInitiative")) return { valid: false };
 
   const hasD20 = rolls.some((roll) => {
     if (roll.dice?.some((die) => die.faces === 20)) return true;
@@ -475,9 +523,12 @@ function extractRollInfoFromRolls(baseRollType, rolls, data = {}) {
   });
   if (!hasD20) return { valid: false };
 
-  const normalizedRollType = normalizeRollType(typeString);
-  if (!normalizedRollType || !ROLL_TYPES.has(normalizedRollType)) return { valid: false };
+  const rollType = normalizeRollType(typeString);
+  if (!rollType || !ROLL_TYPES.has(rollType)) return { valid: false };
 
+  const total = Number(firstRoll.total ?? 0);
+  const workflowMessageUuid = getWorkflowMessageUuid(data?.message, firstRoll);
+  const dnd5eRoll = data?.message?.getFlag?.("dnd5e", "roll") ?? {};
   const targetNumber = Number(
     dnd5eRoll.target?.value
     ?? dnd5eRoll.targetValue
@@ -486,33 +537,31 @@ function extractRollInfoFromRolls(baseRollType, rolls, data = {}) {
     ?? data?.targetValue
     ?? data?.dc
     ?? data?.ac
-    ?? midiFlags.targetDC
-    ?? midiFlags.ac
     ?? NaN
   );
 
-  let failureKnown = Number.isFinite(targetNumber);
-  let failed = failureKnown ? total < targetNumber : null;
-
-  if (!failureKnown && game.modules.get("midi-qol")?.active) {
-    const hasHits = Array.isArray(midiFlags.hitTargets) && (midiFlags.hitTargets.length > 0);
-    const hasMisses = Array.isArray(midiFlags.hitTargets) && !hasHits && (normalizedRollType === "attack");
-    if (hasHits || hasMisses) {
-      failureKnown = true;
-      failed = hasMisses;
-    }
-  }
+  const failureKnown = Number.isFinite(targetNumber);
+  const failed = failureKnown ? total < targetNumber : null;
+  const actor = getActorFromRollContext(data);
 
   return {
     valid: true,
+    rollType,
+    label: humanizeRollType(rollType),
     total,
-      rollType: normalizedRollType,
-      label: humanizeRollType(normalizedRollType),
     failureKnown,
     failed,
-    messageUuid: message?.uuid ?? null,
-    messageId: message?.id ?? null,
-      promptId: buildRollPromptId(data, normalizedRollType, firstRoll, total)
+    messageUuid: workflowMessageUuid ?? data?.message?.uuid ?? null,
+    messageId: data?.message?.id ?? null,
+    tokenUuid: getRollTokenUuid(data?.message, data),
+    targetNumber: Number.isFinite(targetNumber) ? targetNumber : null,
+    rollJson: firstRoll?.toJSON?.() ?? null,
+    midiWorkflow: Boolean(workflowMessageUuid && isMidiQolActive()),
+    promptId: buildPromptId(actor, {
+      rollType,
+      total,
+      messageUuid: workflowMessageUuid ?? data?.message?.uuid ?? null
+    })
   };
 }
 
@@ -527,12 +576,7 @@ function injectChatPromptButton(html, actor, rollInfo) {
   button.innerHTML = `<i class="fas fa-music"></i> Bardic Inspiration`;
   button.addEventListener("click", async () => {
     await promptUseInspiration(actor, {
-      rollType: rollInfo.label,
-      total: rollInfo.total,
-      messageUuid: rollInfo.messageUuid,
-      messageId: rollInfo.messageId,
-      failureKnown: rollInfo.failureKnown,
-      failed: rollInfo.failed,
+      ...rollInfo,
       promptId: `${rollInfo.promptId}|button`
     });
   });
@@ -570,13 +614,32 @@ function humanizeRollType(rollType) {
   }
 }
 
+function getInspiredEffects(actor, { includeDisabled = false } = {}) {
+  return actor?.effects?.filter((effect) => {
+    if (!effect || !isInspiredCandidate(effect)) return false;
+    if (!includeDisabled && effect.disabled) return false;
+    return true;
+  }) ?? [];
+}
+
 function findInspiredEffect(actor) {
-  if (!actor) return null;
-  return actor.effects.find((effect) => {
-    const statuses = effect.statuses;
-    const hasStatus = Array.isArray(statuses) ? statuses.includes(STATUS_ID) : statuses?.has?.(STATUS_ID);
-    return hasStatus || Boolean(getEffectFlags(effect)?.die);
-  }) ?? null;
+  return getInspiredEffects(actor)[0] ?? null;
+}
+
+function isInspiredCandidate(effect) {
+  if (!effect) return false;
+
+  const statuses = effect.statuses;
+  const hasStatus = Array.isArray(statuses) ? statuses.includes(STATUS_ID) : statuses?.has?.(STATUS_ID);
+  if (hasStatus) return true;
+  if (getEffectFlags(effect)?.die) return true;
+
+  const effectName = String(effect.name ?? effect.label ?? "").trim().toLowerCase();
+  const effectImg = String(effect.img ?? effect.icon ?? "");
+  const seconds = Number(effect.duration?.seconds ?? 0);
+  return (effectName === EFFECT_NAME.toLowerCase())
+    && (effectImg === EFFECT_ICON)
+    && (seconds === EFFECT_DURATION_SECONDS);
 }
 
 function looksLikeBardicInspirationMessage(message) {
@@ -588,8 +651,37 @@ function looksLikeBardicInspirationMessage(message) {
     message.getFlag("dnd5e", "item")?.name,
     message.getFlag("dnd5e", "activity")?.name
   ].filter(Boolean).map((value) => String(value).toLowerCase());
-
   return candidates.some((value) => value.includes("bardic inspiration"));
+}
+
+async function maybeSuppressBardicInspirationCastRoll(message, userId) {
+  if (userId !== game.user.id) return false;
+  if (!looksLikeBardicInspirationMessage(message)) return false;
+  if (!isStandaloneBardicInspirationRollMessage(message)) return false;
+
+  try {
+    await message.delete();
+    debug("Suppressed standalone Bardic Inspiration cast roll message", {
+      messageUuid: message.uuid
+    });
+    return true;
+  } catch (error) {
+    console.error(`${MODULE_ID} | Failed to suppress Bardic Inspiration cast roll`, error);
+    return false;
+  }
+}
+
+function isStandaloneBardicInspirationRollMessage(message) {
+  const rolls = Array.isArray(message?.rolls) ? message.rolls : [];
+  if (!rolls.length) return false;
+
+  const content = String(message?.content ?? "").toLowerCase();
+  if (content.includes("card-buttons")) return false;
+  if (content.includes("chat-card")) return false;
+  if (content.includes("dnd5e2")) return false;
+
+  const formulas = rolls.map((roll) => String(roll?.formula ?? "").replace(/\s+/g, "").toLowerCase());
+  return formulas.length > 0 && formulas.every((formula) => /^1d(6|8|10|12)$/.test(formula));
 }
 
 function isBardicInspirationItem(item) {
@@ -601,11 +693,11 @@ function isBardicInspirationItem(item) {
 
 function shouldHandleActivityApplication(item, message) {
   if (!item?.actor) return false;
-  const authorId = message?.user?.id;
-  if (authorId && (authorId !== game.user.id)) return false;
-  if (!authorId && !item.actor.isOwner && !game.user.isGM) return false;
   if (message?.getFlag(MODULE_ID, "createdByModule")) return false;
-  return true;
+
+  const authorId = message?.user?.id;
+  if (authorId) return authorId === game.user.id;
+  return item.actor.isOwner || game.user.isGM;
 }
 
 function getActorFromTarget(target) {
@@ -634,8 +726,7 @@ function getPromptUser(actor) {
 }
 
 function isPromptUserForActor(actor) {
-  const promptUser = getPromptUser(actor);
-  return promptUser?.id === game.user.id;
+  return getPromptUser(actor)?.id === game.user.id;
 }
 
 async function onSocketMessage(data) {
@@ -647,6 +738,7 @@ async function onSocketMessage(data) {
 
 async function showInspirationPrompt(request) {
   if (request.promptId && HANDLED_PROMPTS.has(request.promptId)) return;
+
   const actor = await fromUuid(request.actorUuid);
   if (!actor) return;
 
@@ -664,10 +756,17 @@ async function showInspirationPrompt(request) {
   const total = rollData.total ?? 0;
   const body = `
     <div class="bi2024-dialog">
-      <p><strong>${actor.name}</strong></p>
-      <p>${rollData.rollType ?? "D20 Test"} total: <strong>${total}</strong></p>
-      <p>Bardic Inspiration die: <strong>${die}</strong></p>
-      <p>Source bard: <strong>${sourceName}</strong></p>
+      <div class="bi2024-dialog__header">
+        <img class="bi2024-dialog__icon" src="${EFFECT_ICON}" alt="Bardic Inspiration">
+        <div>
+          <p class="bi2024-dialog__title">${actor.name}</p>
+          <p class="bi2024-dialog__subtitle">${rollData.rollType ?? "D20 Test"} total: <strong>${total}</strong></p>
+        </div>
+      </div>
+      <div class="bi2024-dialog__meta">
+        <span>Bardic die <strong>${die}</strong></span>
+        <span>Source <strong>${sourceName}</strong></span>
+      </div>
     </div>
   `;
 
@@ -691,7 +790,7 @@ async function showInspirationPrompt(request) {
   });
 
   if (choice !== "use") return;
-  await spendBardicInspiration(actor, effect, request.rollData ?? {});
+  await spendBardicInspiration(actor, effect, rollData);
 }
 
 async function spendBardicInspiration(actor, effect, rollData) {
@@ -700,8 +799,7 @@ async function spendBardicInspiration(actor, effect, rollData) {
 
   await effect.update({ [`flags.${FLAG_SCOPE}.used`]: true });
 
-  const dieFormula = `1${effectFlags.die ?? "d6"}`;
-  const roll = await (new Roll(dieFormula)).evaluate({ async: true });
+  const roll = await (new Roll(`1${effectFlags.die ?? "d6"}`)).evaluate({ async: true });
   const rollMode = game.settings.get("core", "rollMode");
 
   await roll.toMessage({
@@ -717,17 +815,29 @@ async function spendBardicInspiration(actor, effect, rollData) {
 
   const originalTotal = Number(rollData.total ?? 0);
   const newTotal = originalTotal + Number(roll.total ?? 0);
-  const content = `
-    <div class="bi2024-summary">
-      <p><strong>${actor.name}</strong> uses Bardic Inspiration.</p>
-      <p>${rollData.rollType ?? "Roll"}: ${originalTotal} + ${roll.total} = <strong>${newTotal}</strong></p>
-    </div>
-  `;
-
+  const integrationResult = await applyWorkflowBonuses(actor, rollData, Number(roll.total ?? 0));
+  const integrationNotes = [];
+  if (integrationResult.midi) integrationNotes.push("Midi-QOL card updated.");
+  if (integrationResult.monks) integrationNotes.push("Monk's TokenBar card updated.");
   await ChatMessage.create({
     user: game.user.id,
     speaker: ChatMessage.getSpeaker({ actor }),
-    content,
+    content: `
+      <div class="bi2024-summary">
+        <div class="bi2024-summary__header">
+          <img class="bi2024-summary__icon" src="${EFFECT_ICON}" alt="Bardic Inspiration">
+          <div>
+            <p class="bi2024-summary__eyebrow">Bardic Inspiration</p>
+            <p class="bi2024-summary__title">${actor.name} uses inspiration</p>
+          </div>
+        </div>
+        <div class="bi2024-summary__math">
+          <span class="bi2024-summary__pill">${rollData.rollType ?? "Roll"}</span>
+          <p>${originalTotal} + ${roll.total} = <strong>${newTotal}</strong></p>
+        </div>
+        ${integrationNotes.length ? `<p class="bi2024-summary__note">${integrationNotes.join(" ")}</p>` : ""}
+      </div>
+    `,
     flags: {
       [MODULE_ID]: {
         createdByModule: true,
@@ -736,17 +846,30 @@ async function spendBardicInspiration(actor, effect, rollData) {
     }
   }, { rollMode });
 
+  await disableOtherBardicInspirationEffects(actor, effect);
   await removeInspiredEffect(actor, effect);
 }
 
-function wasRecentlyApplied(key) {
-  const previous = RECENT_APPLICATIONS.get(key);
-  if (!previous) return false;
-  return (Date.now() - previous) < 1500;
+function wasRecentlyAppliedToTarget(key) {
+  const previous = RECENT_TARGET_APPLICATIONS.get(key);
+  return Boolean(previous) && ((Date.now() - previous) < 5000);
 }
 
-function rememberApplication(key) {
-  RECENT_APPLICATIONS.set(key, Date.now());
+function rememberTargetApplication(key) {
+  RECENT_TARGET_APPLICATIONS.set(key, Date.now());
+}
+
+function buildSourceApplicationKey(sourceActor) {
+  return sourceActor?.uuid ?? "unknown-source";
+}
+
+function rememberRecentSourceApplication(sourceActor) {
+  RECENT_SOURCE_APPLICATIONS.set(buildSourceApplicationKey(sourceActor), Date.now());
+}
+
+function wasRecentSourceApplication(sourceActor) {
+  const previous = RECENT_SOURCE_APPLICATIONS.get(buildSourceApplicationKey(sourceActor));
+  return Boolean(previous) && ((Date.now() - previous) < 5000);
 }
 
 function getApplicationMessageKey(message) {
@@ -761,8 +884,7 @@ function rememberApplicationMessage(message) {
 
 function wasApplicationMessageHandled(message) {
   const key = getApplicationMessageKey(message);
-  if (!key) return false;
-  return HANDLED_APPLICATION_MESSAGES.has(key);
+  return key ? HANDLED_APPLICATION_MESSAGES.has(key) : false;
 }
 
 function getActorFromRollContext(data = {}) {
@@ -774,14 +896,78 @@ function getActorFromRollContext(data = {}) {
 }
 
 async function removeInspiredEffect(actor, effect) {
-  const current = effect?.id ? actor?.effects?.get(effect.id) : null;
-  if (current) {
-    await current.delete();
-    return;
+  const allInspired = getInspiredEffects(actor, { includeDisabled: true });
+  const ids = allInspired.map((entry) => entry.id).filter(Boolean);
+  if (!ids.length) return;
+  await actor.deleteEmbeddedDocuments("ActiveEffect", ids);
+}
+
+async function disableOtherBardicInspirationEffects(actor, consumedEffect) {
+  const effectsToDisable = actor?.effects?.filter((effect) => {
+    if (!effect || (effect.id === consumedEffect?.id)) return false;
+    if (effect.disabled) return false;
+    if (isInspiredCandidate(effect)) return false;
+
+    const name = String(effect.name ?? effect.label ?? "").trim().toLowerCase();
+    const origin = String(effect.origin ?? "").toLowerCase();
+    return name.includes("bardic inspiration") || origin.includes("bardic");
+  }) ?? [];
+
+  if (!effectsToDisable.length) return;
+
+  await actor.updateEmbeddedDocuments("ActiveEffect", effectsToDisable.map((effect) => ({
+    _id: effect.id,
+    disabled: true
+  })));
+
+  debug("Disabled non-module Bardic Inspiration effects after spend", {
+    actor: actor.name,
+    count: effectsToDisable.length
+  });
+}
+
+function scheduleInspiredConsolidation(actor, preferredId = null) {
+  if (!actor?.uuid) return;
+
+  const existingTimer = CONSOLIDATION_TIMERS.get(actor.uuid);
+  if (existingTimer) clearTimeout(existingTimer);
+
+  const timer = setTimeout(() => {
+    CONSOLIDATION_TIMERS.delete(actor.uuid);
+    void consolidateInspiredEffects(actor, preferredId);
+  }, 200);
+
+  CONSOLIDATION_TIMERS.set(actor.uuid, timer);
+}
+
+async function consolidateInspiredEffects(actor, preferredId = null, fallbackData = null) {
+  const candidates = getInspiredEffects(actor, { includeDisabled: true });
+  if (!candidates.length) return null;
+
+  let keeper = preferredId ? actor.effects.get(preferredId) : null;
+  keeper ??= candidates.find((effect) => Boolean(getEffectFlags(effect)?.die));
+  keeper ??= candidates[0];
+  if (!keeper) return null;
+
+  const keeperFlags = getEffectFlags(keeper);
+  if (!keeperFlags.die && fallbackData) {
+    await keeper.update(fallbackData);
   }
 
-  const fallback = findInspiredEffect(actor);
-  if (fallback) await fallback.delete();
+  const duplicateIds = candidates
+    .filter((effect) => effect.id !== keeper.id)
+    .map((effect) => effect.id)
+    .filter(Boolean);
+
+  if (duplicateIds.length) {
+    await actor.deleteEmbeddedDocuments("ActiveEffect", duplicateIds);
+    debug("Consolidated duplicate Inspired effects", {
+      actor: actor.name,
+      removed: duplicateIds.length
+    });
+  }
+
+  return actor.effects.get(keeper.id) ?? keeper;
 }
 
 function getEffectFlags(effect) {
@@ -798,14 +984,376 @@ function buildPromptId(actor, rollData = {}) {
   ].join("|");
 }
 
-function buildRollPromptId(data, rollType, roll, total) {
-  return [
-    getActorFromRollContext(data)?.uuid ?? "unknown-actor",
-    rollType,
-    total,
-    roll?.formula ?? "no-formula",
-    data?.workflowId ?? data?.message?.uuid ?? "no-workflow"
-  ].join("|");
+async function applyMidiWorkflowBonus(actor, rollData, bonus) {
+  if (!isMidiQolActive()) return false;
+
+  switch (rollData?.rollType) {
+    case "attack":
+      return applyMidiAttackBonus(rollData, bonus);
+    case "save":
+    case "check":
+    case "skill":
+      return applyMidiSaveOrCheckBonus(actor, rollData, bonus);
+    default:
+      return false;
+  }
+}
+
+async function applyWorkflowBonuses(actor, rollData, bonus) {
+  const [midi, monks] = await Promise.all([
+    applyMidiWorkflowBonus(actor, rollData, bonus),
+    applyMonksTokenBarBonus(actor, rollData, bonus)
+  ]);
+
+  return { midi, monks };
+}
+
+async function applyMidiAttackBonus(rollData, bonus) {
+  if (!isMidiQolActive()) return false;
+  if (rollData?.rollType !== "attack") return false;
+
+  const messageUuid = rollData?.messageUuid ?? null;
+  if (!messageUuid) return false;
+
+  const workflow = getMidiWorkflow(messageUuid);
+  if (!workflow?.attackRoll) return false;
+
+  const updatedRoll = cloneRollWithBonus(workflow.attackRoll, bonus);
+  if (!updatedRoll) return false;
+
+  try {
+    if (typeof workflow.setAttackRoll === "function") {
+      await workflow.setAttackRoll(updatedRoll);
+    } else {
+      workflow.attackRoll = updatedRoll;
+      workflow.attackTotal = updatedRoll.total ?? 0;
+    }
+
+    workflow.attackRolled = true;
+    workflow.needsDamage ??= Boolean(workflow.item?.hasDamage);
+
+    if (typeof workflow.displayAttackRoll === "function") {
+      await workflow.displayAttackRoll();
+    }
+    if (typeof workflow.recordTargetACModifiers === "function") {
+      workflow.recordTargetACModifiers();
+    }
+    if (typeof workflow.checkHits === "function") {
+      await workflow.checkHits(workflow.workflowOptions ?? {});
+    }
+    if (typeof workflow.displayHits === "function") {
+      await workflow.displayHits(shouldWhisperMidiHits());
+    }
+
+    debug("Updated Midi-QOL workflow with Bardic Inspiration", {
+      messageUuid,
+      attackTotal: workflow.attackTotal
+    });
+    return true;
+  } catch (error) {
+    console.error(`${MODULE_ID} | Failed to update Midi-QOL workflow`, error);
+    return false;
+  }
+}
+
+async function applyMidiSaveOrCheckBonus(actor, rollData, bonus) {
+  const messageUuid = rollData?.messageUuid ?? null;
+  if (!messageUuid) return false;
+
+  const workflow = getMidiWorkflow(messageUuid);
+  if (!workflow?.processTargetSaveResult || !workflow?.displaySaves) return false;
+
+  const targets = [...(workflow.hitTargets ?? []), ...(workflow.hitTargetsEC ?? [])];
+  if (!targets.length) return false;
+
+  const targetUuid = rollData.tokenUuid ?? getActorTokenUuid(actor);
+  const targetIndex = targets.findIndex((target) => getTokenUuid(target) === targetUuid);
+  if (targetIndex < 0) return false;
+
+  const adjustedRoll = cloneRollWithBonus(
+    rollFromJson(rollData.rollJson) ?? workflow.saveResults?.[targetIndex] ?? null,
+    bonus
+  );
+  if (!adjustedRoll) return false;
+
+  const existingResults = Array.isArray(workflow.saveResults) ? [...workflow.saveResults] : [];
+  if (!existingResults.length) return false;
+
+  const templateDocument = workflow.templateUuid ? await fromUuid(workflow.templateUuid) : null;
+  const D20Roll = CONFIG.Dice.D20Roll;
+  const context = {
+    rollDC: Number.isFinite(Number(rollData.targetNumber))
+      ? Number(rollData.targetNumber)
+      : Number(workflow.saveDC ?? workflow.saveActivity?.save?.dc?.value ?? workflow.saveActivity?.check?.dc?.value ?? 0),
+    rollAbility: adjustedRoll.options?.midiChosenId ?? null,
+    rollType: rollData.rollType,
+    template: templateDocument?.object,
+    D20Roll
+  };
+
+  workflow.initSaveResults?.();
+  workflow.targetSaveDetails ??= {};
+
+  for (let index = 0; index < targets.length; index += 1) {
+    const target = targets[index];
+    const rollResult = index === targetIndex ? adjustedRoll : existingResults[index];
+    if (!target || !rollResult) continue;
+    await workflow.processTargetSaveResult(target, [rollResult], context);
+  }
+
+  await workflow.displaySaves(isMidiWhisperSaveDisplay(workflow));
+
+  debug("Updated Midi-QOL save/check workflow with Bardic Inspiration", {
+    messageUuid,
+    rollType: rollData.rollType,
+    targetUuid
+  });
+  return true;
+}
+
+async function applyMonksTokenBarBonus(actor, rollData, bonus) {
+  if (!isMonksTokenBarActive()) return false;
+  if (!["save", "check", "skill"].includes(rollData?.rollType)) return false;
+
+  const match = findMonksTokenBarMessage(actor, rollData);
+  if (!match) return false;
+
+  const { message, tokenKey, tokenData } = match;
+  const sourceRoll = rollFromJson(tokenData.roll) ?? rollFromJson(rollData.rollJson);
+  if (!sourceRoll) return false;
+
+  const adjustedRoll = cloneRollWithBonus(sourceRoll, bonus);
+  if (!adjustedRoll) return false;
+
+  const flags = foundry.utils.duplicate(message.flags?.["monks-tokenbar"] ?? {});
+  const updatedToken = foundry.utils.duplicate(flags[tokenKey] ?? tokenData);
+  updatedToken.roll = adjustedRoll.toJSON();
+  updatedToken.total = adjustedRoll.total ?? 0;
+  updatedToken.reveal = true;
+
+  const dc = Number.parseInt(flags.dc, 10);
+  if (Number.isFinite(dc)) {
+    Object.assign(
+      updatedToken,
+      getMonksRollSuccess(adjustedRoll, dc, updatedToken.actorid, updatedToken.request ?? null)
+    );
+  }
+
+  flags[tokenKey] = updatedToken;
+
+  const rolls = Object.entries(flags)
+    .filter(([key, value]) => key.startsWith("token") && value?.roll)
+    .map(([, value]) => value.roll);
+
+  const content = updateMonksTokenBarContent(message.content, flags, updatedToken.id, dc);
+  await message.update({
+    content,
+    flags: { "monks-tokenbar": flags },
+    rolls
+  });
+
+  debug("Updated Monk's TokenBar card with Bardic Inspiration", {
+    actor: actor.name,
+    messageId: message.id,
+    tokenId: updatedToken.id,
+    total: updatedToken.total,
+    passed: updatedToken.passed
+  });
+  return true;
+}
+
+function cloneRollWithBonus(roll, bonus) {
+  const RollClass = CONFIG?.Dice?.rolls?.find?.((entry) => entry.name === roll?.constructor?.name) ?? Roll;
+  const source = roll?.toJSON?.() ?? roll;
+  const cloned = RollClass.fromData?.(source) ?? Roll.fromData?.(source) ?? null;
+  if (!cloned) return null;
+
+  const numericBonus = Number(bonus ?? 0);
+  const originalTotal = Number(roll.total ?? 0);
+  cloned._evaluated = true;
+  cloned._formula = `${roll.formula} + ${numericBonus}`;
+  cloned._total = originalTotal + numericBonus;
+  cloned.options ??= {};
+  cloned.options[MODULE_ID] = {
+    bardicInspirationBonus: numericBonus,
+    originalTotal
+  };
+  return cloned;
+}
+
+function rollFromJson(rollJson) {
+  if (!rollJson) return null;
+  try {
+    return Roll.fromData?.(rollJson) ?? null;
+  } catch (error) {
+    console.error(`${MODULE_ID} | Failed to restore roll data`, error);
+    return null;
+  }
+}
+
+function getMidiWorkflow(messageUuid) {
+  return getMidiQolApi()?.Workflow?.getWorkflow?.(messageUuid) ?? null;
+}
+
+function findMonksTokenBarMessage(actor, rollData) {
+  const tokenUuid = normalizeUuid(rollData?.tokenUuid ?? getActorTokenUuid(actor));
+  const originalTotal = Number(rollData?.total ?? NaN);
+  const messages = [...(game.messages?.contents ?? [])].reverse();
+
+  for (const message of messages) {
+    if (message.getFlag?.("monks-tokenbar", "what") !== "savingthrow") continue;
+
+    const flags = message.flags?.["monks-tokenbar"] ?? {};
+    for (const [tokenKey, tokenData] of Object.entries(flags)) {
+      if (!tokenKey.startsWith("token") || !tokenData) continue;
+      if (tokenData.actorid !== actor.id && normalizeUuid(tokenData.uuid) !== tokenUuid) continue;
+
+      const tokenTotal = Number(tokenData.total ?? tokenData.roll?.total ?? NaN);
+      if (Number.isFinite(originalTotal) && Number.isFinite(tokenTotal) && tokenTotal !== originalTotal) continue;
+
+      return { message, tokenKey, tokenData };
+    }
+  }
+
+  return null;
+}
+
+function updateMonksTokenBarContent(content, flags, tokenId, dc) {
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = content;
+
+  const tokenEntries = Object.entries(flags)
+    .filter(([key, value]) => key.startsWith("token") && value)
+    .map(([, value]) => value);
+
+  const item = wrapper.querySelector(`.item[data-item-id="${tokenId}"]`);
+  const tokenData = tokenEntries.find((entry) => String(entry.id) === String(tokenId));
+
+  if (item && tokenData) {
+    const total = Number(tokenData.total ?? tokenData.roll?.total ?? 0);
+    item.querySelector(".dice-result")?.classList.add("reveal");
+
+    const totalElement = item.querySelector(".dice-result .total");
+    if (totalElement) totalElement.textContent = String(total);
+
+    const passedButton = item.querySelector(".result-passed");
+    const failedButton = item.querySelector(".result-failed");
+    const passedIcon = passedButton?.querySelector("i");
+    const failedIcon = failedButton?.querySelector("i");
+    const diceText = item.querySelector(".dice-text");
+    const diceTotal = item.querySelector(".dice-total");
+
+    const passed = tokenData.passed === true || tokenData.passed === "success";
+    const failed = tokenData.passed === false || tokenData.passed === "failed";
+    const criticalPass = tokenData.passed === "success";
+    const criticalFail = tokenData.passed === "failed";
+
+    passedButton?.classList.toggle("selected", passed);
+    failedButton?.classList.toggle("selected", failed);
+    passedButton?.classList.toggle("recommended", Number.isFinite(dc) && total >= dc);
+    failedButton?.classList.toggle("recommended", Number.isFinite(dc) && total < dc);
+
+    if (passedIcon) {
+      passedIcon.classList.toggle("fa-check", !criticalPass);
+      passedIcon.classList.toggle("fa-check-double", criticalPass);
+    }
+
+    if (failedIcon) {
+      failedIcon.classList.toggle("fa-times", !criticalFail);
+      failedIcon.classList.toggle("fa-ban", criticalFail);
+    }
+
+    if (diceText) {
+      diceText.classList.toggle("passed", passed);
+      diceText.classList.toggle("failed", failed);
+      if (criticalPass) diceText.innerHTML = '<i class="fas fa-check-double"></i>';
+      else if (passed) diceText.innerHTML = '<i class="fas fa-check"></i>';
+      else if (criticalFail) diceText.innerHTML = '<i class="fas fa-ban"></i>';
+      else if (failed) diceText.innerHTML = '<i class="fas fa-times"></i>';
+    }
+
+    if (diceTotal && Number.isFinite(dc)) {
+      diceTotal.setAttribute("title", `${total} vs DC ${dc}`);
+    }
+  }
+
+  const rolledTotals = tokenEntries
+    .map((entry) => Number(entry.total ?? entry.roll?.total ?? NaN))
+    .filter((value) => Number.isFinite(value));
+
+  const groupDc = wrapper.querySelector(".group-dc");
+  if (groupDc && rolledTotals.length) {
+    groupDc.textContent = String(Math.trunc(rolledTotals.reduce((sum, value) => sum + value, 0) / rolledTotals.length));
+  }
+
+  return wrapper.innerHTML;
+}
+
+function getMonksRollSuccess(roll, dc, actorId, request) {
+  return game.MonksTokenBar?.system?.rollSuccess?.(roll, dc, actorId, request) ?? { passed: roll?.total >= dc };
+}
+
+function getWorkflowMessageUuid(message, firstRoll = null) {
+  const originatingMessage = firstRoll?.options?.originatingMessage
+    ?? message?.getFlag?.("dnd5e", "originatingMessage")
+    ?? null;
+  if (!originatingMessage) return null;
+
+  if (String(originatingMessage).includes(".")) {
+    return fromUuidSync(originatingMessage)?.uuid ?? null;
+  }
+
+  return game.messages?.get(originatingMessage)?.uuid ?? null;
+}
+
+function getRollTokenUuid(message, data = {}) {
+  const requestId = message?.getFlag?.("midi-qol", "requestId");
+  if (requestId) return requestId;
+
+  const subject = data?.subject;
+  if (subject?.documentName === "Token") return subject.uuid;
+  if (subject?.token?.uuid) return subject.token.uuid;
+  if (subject?.document?.uuid?.includes?.(".Token.")) return subject.document.uuid;
+
+  return getActorTokenUuid(getActorFromRollContext(data));
+}
+
+function normalizeUuid(uuid) {
+  return String(uuid ?? "").trim().toLowerCase();
+}
+
+function getActorTokenUuid(actor) {
+  if (!actor) return null;
+  if (actor.token?.uuid) return actor.token.uuid;
+  const activeToken = actor.getActiveTokens?.(true, true)?.[0] ?? actor.getActiveTokens?.()[0] ?? null;
+  return activeToken?.document?.uuid ?? activeToken?.uuid ?? null;
+}
+
+function getTokenUuid(target) {
+  return target?.document?.uuid ?? target?.uuid ?? null;
+}
+
+function getMidiQolApi() {
+  return globalThis.MidiQOL ?? game.modules.get("midi-qol")?.api ?? null;
+}
+
+function isMidiQolActive() {
+  return Boolean(game.modules.get("midi-qol")?.active);
+}
+
+function isMonksTokenBarActive() {
+  return Boolean(game.modules.get("monks-tokenbar")?.active);
+}
+
+function shouldWhisperMidiHits() {
+  return game.settings.get("core", "rollMode") === CONST.DICE_ROLL_MODES.BLIND;
+}
+
+function isMidiWhisperSaveDisplay(workflow) {
+  const saveDisplay = (workflow?.activity?.saveDisplay ?? "default") === "default"
+    ? getMidiQolApi()?.configSettings?.()?.autoCheckSaves
+    : workflow.activity.saveDisplay;
+  return saveDisplay === "whisper";
 }
 
 function setting(key) {

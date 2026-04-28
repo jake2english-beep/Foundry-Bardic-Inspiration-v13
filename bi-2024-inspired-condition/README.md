@@ -36,7 +36,7 @@ This module automates the 2024 Bardic Inspiration flow for Foundry VTT v13 and t
 4. Paste this manifest URL:
 
 ```text
-https://raw.githubusercontent.com/GingaNinja71/Foundry-Bardic-Inspiration-v13/main/bi-2024-inspired-condition/module.json
+https://raw.githubusercontent.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/main/bi-2024-inspired-condition/module.json
 ```
 
 5. Install the module.
@@ -47,7 +47,7 @@ https://raw.githubusercontent.com/GingaNinja71/Foundry-Bardic-Inspiration-v13/ma
 1. Download the latest release zip:
 
 ```text
-https://github.com/GingaNinja71/Foundry-Bardic-Inspiration-v13/releases/latest/download/bi-2024-inspired-condition.zip
+https://github.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/releases/latest/download/bi-2024-inspired-condition.zip
 ```
 
 2. Extract it into Foundry's `Data/modules` directory.
@@ -58,9 +58,9 @@ https://github.com/GingaNinja71/Foundry-Bardic-Inspiration-v13/releases/latest/d
 
 ## GitHub
 
-- Repository: `https://github.com/GingaNinja71/Foundry-Bardic-Inspiration-v13`
-- Manifest: `https://raw.githubusercontent.com/GingaNinja71/Foundry-Bardic-Inspiration-v13/main/bi-2024-inspired-condition/module.json`
-- Latest Download: `https://github.com/GingaNinja71/Foundry-Bardic-Inspiration-v13/releases/latest/download/bi-2024-inspired-condition.zip`
+- Repository: `https://github.com/jake2english-beep/Foundry-Bardic-Inspiration-v13`
+- Manifest: `https://raw.githubusercontent.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/main/bi-2024-inspired-condition/module.json`
+- Latest Download: `https://github.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/releases/latest/download/bi-2024-inspired-condition.zip`
 
 ## Settings
 

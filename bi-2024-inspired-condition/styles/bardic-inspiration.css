@@ -1,11 +1,107 @@
-.bi2024-dialog p,
-.bi2024-summary p {
-  margin: 0 0 0.5rem;
+.bi2024-dialog,
+.bi2024-summary {
+  color: #f6ead7;
 }
 
-.bi2024-dialog p:last-child,
-.bi2024-summary p:last-child {
-  margin-bottom: 0;
+.bi2024-dialog p,
+.bi2024-summary p {
+  margin: 0;
+}
+
+.bi2024-dialog {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.bi2024-dialog__header {
+  align-items: center;
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: 44px 1fr;
+}
+
+.bi2024-dialog__icon,
+.bi2024-summary__icon {
+  background: radial-gradient(circle at 30% 30%, #6f2841, #1a0911 72%);
+  border: 1px solid rgba(233, 196, 106, 0.6);
+  border-radius: 12px;
+  box-shadow: 0 0 0 1px rgba(36, 11, 19, 0.8) inset;
+  display: block;
+  height: 44px;
+  width: 44px;
+}
+
+.bi2024-dialog__title,
+.bi2024-summary__title {
+  color: #fff5de;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.15;
+}
+
+.bi2024-dialog__subtitle,
+.bi2024-summary__eyebrow {
+  color: #d8bd8c;
+  font-size: 0.82rem;
+}
+
+.bi2024-dialog__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.bi2024-dialog__meta span,
+.bi2024-summary__pill {
+  background: linear-gradient(180deg, rgba(233, 196, 106, 0.18), rgba(128, 66, 22, 0.18));
+  border: 1px solid rgba(233, 196, 106, 0.28);
+  border-radius: 999px;
+  color: #f0d9aa;
+  display: inline-flex;
+  font-size: 0.75rem;
+  gap: 0.25rem;
+  padding: 0.2rem 0.55rem;
+}
+
+.bi2024-summary {
+  background:
+    radial-gradient(circle at top left, rgba(157, 52, 84, 0.28), transparent 44%),
+    linear-gradient(135deg, rgba(31, 11, 18, 0.96), rgba(17, 7, 12, 0.96));
+  border: 1px solid rgba(233, 196, 106, 0.28);
+  border-radius: 14px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+  display: grid;
+  gap: 0.9rem;
+  overflow: hidden;
+  padding: 0.9rem;
+  position: relative;
+}
+
+.bi2024-summary::before {
+  background: linear-gradient(90deg, #e9c46a, #c77d32);
+  content: "";
+  height: 3px;
+  left: 0;
+  position: absolute;
+  right: 0;
+  top: 0;
+}
+
+.bi2024-summary__header {
+  align-items: center;
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: 44px 1fr;
+}
+
+.bi2024-summary__math {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.bi2024-summary__math p strong {
+  color: #ffd785;
+  font-size: 1.12rem;
 }
 
 .bi2024-chat-button-wrap {
@@ -13,9 +109,19 @@
 }
 
 .bi2024-chat-button {
-  width: 100%;
   align-items: center;
+  background: linear-gradient(180deg, rgba(117, 31, 57, 0.96), rgba(63, 13, 31, 0.96));
+  border: 1px solid rgba(233, 196, 106, 0.55);
+  box-shadow: 0 1px 0 rgba(255, 237, 195, 0.1) inset;
+  color: #fff0cf;
   display: inline-flex;
   gap: 0.35rem;
   justify-content: center;
+  width: 100%;
+}
+
+.bi2024-chat-button:hover,
+.bi2024-chat-button:focus {
+  background: linear-gradient(180deg, rgba(143, 41, 72, 0.98), rgba(79, 19, 40, 0.98));
+  box-shadow: 0 0 0 1px rgba(255, 216, 133, 0.22);
 }

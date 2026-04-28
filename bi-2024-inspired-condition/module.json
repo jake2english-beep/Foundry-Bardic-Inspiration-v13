@@ -2,7 +2,7 @@
   "id": "bi-2024-inspired-condition",
   "title": "Bardic Inspiration 2024 Inspired Condition",
   "description": "Automates D&D 5e 2024 Bardic Inspiration for Foundry VTT v13 by applying an Inspired effect and prompting the target to spend it on valid d20 tests.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "authors": [
     {

@@ -41,8 +41,8 @@
   "socket": true,
   "readme": "README.md",
   "license": "LICENSE",
-  "url": "https://github.com/jake2english-beep/Foundry-Bardic-Inspiration-v13",
-  "manifest": "https://raw.githubusercontent.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/main/bi-2024-inspired-condition/module.json",
-  "download": "https://github.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/releases/latest/download/bi-2024-inspired-condition.zip",
-  "bugs": "https://github.com/jake2english-beep/Foundry-Bardic-Inspiration-v13/issues"
+  "url": "https://github.com/GingaNinja71/Foundry-Bardic-Inspiration-v13",
+  "manifest": "https://raw.githubusercontent.com/GingaNinja71/Foundry-Bardic-Inspiration-v13/main/bi-2024-inspired-condition/module.json",
+  "download": "https://github.com/GingaNinja71/Foundry-Bardic-Inspiration-v13/releases/latest/download/bi-2024-inspired-condition.zip",
+  "bugs": "https://github.com/GingaNinja71/Foundry-Bardic-Inspiration-v13/issues"
 }
